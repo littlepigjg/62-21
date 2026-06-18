@@ -1,6 +1,7 @@
 import asyncio
+import uuid
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Header
 from datetime import datetime
 
 from ..config import settings
@@ -8,9 +9,12 @@ from ..models import (
     CommandExecuteRequest,
     ScriptExecuteRequest,
     ExecutionResult,
+    AuditOperation,
 )
 from ..core.scheduler import scheduler
 from ..core.stream import stream_manager
+from ..core.audit_storage import audit_storage
+from ..core.audit_detector import audit_detector
 
 router = APIRouter(prefix="/execute", tags=["Execute"])
 
@@ -52,8 +56,48 @@ def _register_stream_callbacks(task_ids: List[str]) -> None:
         task.done_callbacks.append(_make_done_cb(tid, task.server_id, task.server_name))
 
 
+def _record_audit_operation(
+    operation_type: str,
+    detail: dict,
+    target: Optional[str] = None,
+    target_id: Optional[str] = None,
+    x_audit_session: Optional[str] = None,
+    x_audit_user_id: Optional[str] = None,
+    x_audit_user_name: Optional[str] = None,
+) -> None:
+    try:
+        session_id = x_audit_session or f"api-sess-{uuid.uuid4().hex[:12]}"
+        user_id = x_audit_user_id or "system"
+        user_name = x_audit_user_name or "system"
+
+        op = AuditOperation(
+            id=f"op-{uuid.uuid4().hex[:16]}",
+            session_id=session_id,
+            user_id=user_id,
+            user_name=user_name,
+            operation_type=operation_type,
+            timestamp=datetime.now().isoformat(),
+            target=target,
+            target_id=target_id,
+            detail=detail,
+            page="api",
+            component="executor",
+            result="success",
+        )
+        saved_op = audit_storage.save_operation(op)
+        audit_detector.process_operation(saved_op)
+    except Exception:
+        pass
+
+
 @router.post("/command", response_model=List[ExecutionResult])
-async def execute_command(req: CommandExecuteRequest, background_tasks: BackgroundTasks):
+async def execute_command(
+    req: CommandExecuteRequest,
+    background_tasks: BackgroundTasks,
+    x_audit_session: Optional[str] = Header(None),
+    x_audit_user_id: Optional[str] = Header(None),
+    x_audit_user_name: Optional[str] = Header(None),
+):
     valid_server_ids = []
     for sid in req.server_ids:
         if settings.get_server(sid):
@@ -74,11 +118,33 @@ async def execute_command(req: CommandExecuteRequest, background_tasks: Backgrou
     task_ids = [r.task_id for r in results]
     _register_stream_callbacks(task_ids)
 
+    _record_audit_operation(
+        operation_type="command_execute",
+        detail={
+            "command": req.command,
+            "server_ids": valid_server_ids,
+            "timeout": req.timeout,
+            "env": req.env,
+            "task_ids": task_ids,
+        },
+        target="command",
+        target_id=",".join(task_ids),
+        x_audit_session=x_audit_session,
+        x_audit_user_id=x_audit_user_id,
+        x_audit_user_name=x_audit_user_name,
+    )
+
     return results
 
 
 @router.post("/script", response_model=List[ExecutionResult])
-async def execute_script(req: ScriptExecuteRequest, background_tasks: BackgroundTasks):
+async def execute_script(
+    req: ScriptExecuteRequest,
+    background_tasks: BackgroundTasks,
+    x_audit_session: Optional[str] = Header(None),
+    x_audit_user_id: Optional[str] = Header(None),
+    x_audit_user_name: Optional[str] = Header(None),
+):
     valid_server_ids = []
     for sid in req.server_ids:
         if settings.get_server(sid):
@@ -100,6 +166,24 @@ async def execute_script(req: ScriptExecuteRequest, background_tasks: Background
 
     task_ids = [r.task_id for r in results]
     _register_stream_callbacks(task_ids)
+
+    _record_audit_operation(
+        operation_type="script_execute",
+        detail={
+            "script_name": req.script_name,
+            "script_content": req.script_content,
+            "interpreter": req.interpreter,
+            "args": req.args,
+            "server_ids": valid_server_ids,
+            "timeout": req.timeout,
+            "task_ids": task_ids,
+        },
+        target="script",
+        target_id=",".join(task_ids),
+        x_audit_session=x_audit_session,
+        x_audit_user_id=x_audit_user_id,
+        x_audit_user_name=x_audit_user_name,
+    )
 
     return results
 

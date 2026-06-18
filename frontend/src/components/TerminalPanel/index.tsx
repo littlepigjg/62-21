@@ -38,6 +38,7 @@ import {
 import { serversApi, executeApi, templatesApi } from '@/services/api';
 import { wsService } from '@/services/websocket';
 import { useAppStore } from '@/store';
+import { auditRecorder } from '@/services/auditRecorder';
 import type { ServerConfig, ScriptTemplate } from '@/types';
 
 const { TextArea } = Input;
@@ -276,6 +277,24 @@ const TerminalPanel: React.FC = () => {
     };
   }, [outputList.map(o => o[0]).join(',')]);
 
+  const handleSelectChange = (ids: string[]) => {
+    const prev = new Set(selectedServerIds);
+    const next = new Set(ids);
+    ids.forEach(id => {
+      if (!prev.has(id)) {
+        const s = servers.find(x => x.id === id);
+        auditRecorder.recordServerSelect(id, s?.name || id, true);
+      }
+    });
+    selectedServerIds.forEach(id => {
+      if (!next.has(id)) {
+        const s = servers.find(x => x.id === id);
+        auditRecorder.recordServerSelect(id, s?.name || id, false);
+      }
+    });
+    setSelectedServerIds(ids);
+  };
+
   const handleExecute = async () => {
     if (selectedServerIds.length === 0) {
       message.warning('请先选择目标服务器');
@@ -351,7 +370,7 @@ const TerminalPanel: React.FC = () => {
             <ServerSelector
               allServers={servers}
               selectedIds={selectedServerIds}
-              onSelectChange={setSelectedServerIds}
+              onSelectChange={handleSelectChange}
             />
 
             <Card

@@ -5,13 +5,16 @@ import {
   CodeOutlined,
   FileTextOutlined,
   HistoryOutlined,
+  SafetyCertificateOutlined,
 } from '@ant-design/icons';
 import MachineManagement from './components/MachineManagement';
 import TerminalPanel from './components/TerminalPanel';
 import ScriptLibrary from './components/ScriptLibrary';
 import LogViewer from './components/LogViewer';
+import AuditPanel from './components/AuditPanel';
 import { useAppStore } from './store';
 import { wsService } from './services/websocket';
+import { auditRecorder } from './services/auditRecorder';
 
 const { Header, Content } = Layout;
 
@@ -26,6 +29,11 @@ const App: React.FC = () => {
   const runningCount = Array.from(activeTasks.values()).filter(
     t => t.status === 'running' || t.status === 'pending'
   ).length;
+
+  const handleTabChange = (key: string) => {
+    auditRecorder.recordTabSwitch(key);
+    setCurrentTab(key);
+  };
 
   const tabItems = [
     {
@@ -69,6 +77,16 @@ const App: React.FC = () => {
       ),
       children: <LogViewer />,
     },
+    {
+      key: 'audit',
+      label: (
+        <span>
+          <SafetyCertificateOutlined />
+          安全审计
+        </span>
+      ),
+      children: <AuditPanel />,
+    },
   ];
 
   return (
@@ -79,7 +97,7 @@ const App: React.FC = () => {
       <Content className="app-content">
         <Tabs
           activeKey={currentTab}
-          onChange={setCurrentTab}
+          onChange={handleTabChange}
           items={tabItems}
           size="large"
         />

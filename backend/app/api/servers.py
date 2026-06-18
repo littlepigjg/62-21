@@ -1,10 +1,49 @@
+import uuid
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Header
 from pydantic import BaseModel
+from datetime import datetime
 
 from ..config import settings, ServerConfig
+from ..models import AuditOperation
+from ..core.audit_storage import audit_storage
+from ..core.audit_detector import audit_detector
 
 router = APIRouter(prefix="/servers", tags=["Servers"])
+
+
+def _record_audit_operation(
+    operation_type: str,
+    detail: dict,
+    target: Optional[str] = None,
+    target_id: Optional[str] = None,
+    x_audit_session: Optional[str] = None,
+    x_audit_user_id: Optional[str] = None,
+    x_audit_user_name: Optional[str] = None,
+) -> None:
+    try:
+        session_id = x_audit_session or f"api-sess-{uuid.uuid4().hex[:12]}"
+        user_id = x_audit_user_id or "system"
+        user_name = x_audit_user_name or "system"
+
+        op = AuditOperation(
+            id=f"op-{uuid.uuid4().hex[:16]}",
+            session_id=session_id,
+            user_id=user_id,
+            user_name=user_name,
+            operation_type=operation_type,
+            timestamp=datetime.now().isoformat(),
+            target=target,
+            target_id=target_id,
+            detail=detail,
+            page="api",
+            component="servers",
+            result="success",
+        )
+        saved_op = audit_storage.save_operation(op)
+        audit_detector.process_operation(saved_op)
+    except Exception:
+        pass
 
 
 class ServerCreateRequest(BaseModel):
@@ -53,8 +92,12 @@ async def get_server(server_id: str):
 
 
 @router.post("", response_model=ServerConfig, status_code=201)
-async def create_server(req: ServerCreateRequest):
-    import uuid
+async def create_server(
+    req: ServerCreateRequest,
+    x_audit_session: Optional[str] = Header(None),
+    x_audit_user_id: Optional[str] = Header(None),
+    x_audit_user_name: Optional[str] = Header(None),
+):
     sid = req.id or f"server-{uuid.uuid4().hex[:8]}"
     if settings.get_server(sid):
         raise HTTPException(status_code=400, detail=f"Server with id '{sid}' already exists")
@@ -70,11 +113,34 @@ async def create_server(req: ServerCreateRequest):
         tags=req.tags,
     )
     settings.add_server(server)
+
+    _record_audit_operation(
+        operation_type="server_create",
+        detail={
+            "name": req.name,
+            "host": req.host,
+            "port": req.port,
+            "username": req.username,
+            "tags": req.tags,
+        },
+        target="server",
+        target_id=sid,
+        x_audit_session=x_audit_session,
+        x_audit_user_id=x_audit_user_id,
+        x_audit_user_name=x_audit_user_name,
+    )
+
     return server
 
 
 @router.put("/{server_id}", response_model=ServerConfig)
-async def update_server(server_id: str, req: ServerUpdateRequest):
+async def update_server(
+    server_id: str,
+    req: ServerUpdateRequest,
+    x_audit_session: Optional[str] = Header(None),
+    x_audit_user_id: Optional[str] = Header(None),
+    x_audit_user_name: Optional[str] = Header(None),
+):
     server = settings.get_server(server_id)
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
@@ -84,18 +150,54 @@ async def update_server(server_id: str, req: ServerUpdateRequest):
         setattr(server, field, value)
 
     settings.add_server(server)
+
+    _record_audit_operation(
+        operation_type="server_update",
+        detail=update_data,
+        target="server",
+        target_id=server_id,
+        x_audit_session=x_audit_session,
+        x_audit_user_id=x_audit_user_id,
+        x_audit_user_name=x_audit_user_name,
+    )
+
     return server
 
 
 @router.delete("/{server_id}")
-async def delete_server(server_id: str):
+async def delete_server(
+    server_id: str,
+    x_audit_session: Optional[str] = Header(None),
+    x_audit_user_id: Optional[str] = Header(None),
+    x_audit_user_name: Optional[str] = Header(None),
+):
+    server = settings.get_server(server_id)
     if not settings.remove_server(server_id):
         raise HTTPException(status_code=404, detail="Server not found")
+
+    _record_audit_operation(
+        operation_type="server_delete",
+        detail={
+            "server_name": server.name if server else "",
+            "server_host": server.host if server else "",
+        },
+        target="server",
+        target_id=server_id,
+        x_audit_session=x_audit_session,
+        x_audit_user_id=x_audit_user_id,
+        x_audit_user_name=x_audit_user_name,
+    )
+
     return {"message": "Server deleted successfully"}
 
 
 @router.post("/{server_id}/test")
-async def test_connection(server_id: str):
+async def test_connection(
+    server_id: str,
+    x_audit_session: Optional[str] = Header(None),
+    x_audit_user_id: Optional[str] = Header(None),
+    x_audit_user_name: Optional[str] = Header(None),
+):
     server = settings.get_server(server_id)
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
@@ -104,6 +206,15 @@ async def test_connection(server_id: str):
     try:
         conn = ssh_pool.acquire(server)
         try:
+            _record_audit_operation(
+                operation_type="server_test",
+                detail={"server_name": server.name, "server_host": server.host},
+                target="server",
+                target_id=server_id,
+                x_audit_session=x_audit_session,
+                x_audit_user_id=x_audit_user_id,
+                x_audit_user_name=x_audit_user_name,
+            )
             return {"success": True, "message": "Connection successful"}
         finally:
             ssh_pool.release(conn, keep=False)
